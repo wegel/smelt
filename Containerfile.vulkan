@@ -1,0 +1,43 @@
+ARG UBUNTU_IMAGE=ubuntu:24.04
+ARG RUST_VERSION=1.89.0
+
+FROM ${UBUNTU_IMAGE} AS builder
+
+ARG RUST_VERSION
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV CARGO_HOME=/root/.cargo
+ENV RUSTUP_HOME=/root/.rustup
+ENV PATH=/root/.cargo/bin:${PATH}
+ENV CARGO_BUILD_JOBS=4
+ENV CMAKE_BUILD_PARALLEL_LEVEL=4
+ENV NUM_JOBS=4
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    clang \
+    cmake \
+    curl \
+    git \
+    glslc \
+    glslang-tools \
+    libclang-dev \
+    libvulkan-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain ${RUST_VERSION}
+RUN rustup component add rustfmt
+
+WORKDIR /src
+
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+
+RUN cargo build --release --features vulkan && \
+    install -Dm755 target/release/smelt /out/smelt-vulkan
+
+FROM scratch AS artifact
+
+COPY --from=builder /out/smelt-vulkan /smelt-vulkan

@@ -13,6 +13,7 @@ cargo build --release 2>&1 | smelt
 smelt reads stdin, feeds it through a small local model (Qwen3 1.7B, Q4 quantized), and outputs a concise summary. Depending on the input and context, that may span more than one line. The model is automatically downloaded on first run (~1.3GB) to `~/.local/share/smelt/models/`.
 
 Inference runs on GPU via Vulkan, CUDA, or Metal. On CPU it works but is significantly slower.
+When no GPU offload is active, `smelt` prints a startup warning and falls back to CPU inference.
 
 ## Usage
 
@@ -85,6 +86,46 @@ Uses [bartowski/Qwen_Qwen3-1.7B-GGUF](https://huggingface.co/bartowski/Qwen_Qwen
 
 ## Install
 
+### Container builds
+
+Use the containerized builders if you want reproducible backend-specific binaries without relying on host toolchains:
+
+```sh
+make build-vulkan
+make build-cuda
+```
+
+That writes artifacts to:
+
+```text
+dist/smelt-vulkan
+dist/smelt-cuda
+```
+
+And you can install them to `~/.local/bin` with:
+
+```sh
+make install-vulkan
+make install-cuda
+```
+
+To force a specific container runtime:
+
+```sh
+CONTAINER_RUNTIME=docker make build-vulkan
+```
+
+The container builds are organized around:
+
+```text
+Containerfile.vulkan
+Containerfile.cuda
+```
+
+They intentionally use separate images and separate binaries so a CUDA build does not require Vulkan loader libraries, and a Vulkan build does not require CUDA runtime libraries, on the target host.
+
+### Native builds
+
 ```sh
 # Vulkan (Linux/Windows with NVIDIA, AMD, or Intel GPUs)
 cargo install --path . --features vulkan
@@ -97,6 +138,30 @@ cargo install --path . --features metal
 
 # CPU only (no GPU acceleration)
 cargo install --path .
+```
+
+### Backend-specific native installs
+
+If you want separate binaries so each host only loads the backend it has runtime libs for, install them under different names:
+
+```sh
+bash scripts/install-backend.sh vulkan
+bash scripts/install-backend.sh cuda
+bash scripts/install-backend.sh cpu
+```
+
+That installs to:
+
+```text
+~/.local/bin/smelt-vulkan
+~/.local/bin/smelt-cuda
+~/.local/bin/smelt-cpu
+```
+
+You can also override the output name:
+
+```sh
+bash scripts/install-backend.sh vulkan smelt
 ```
 
 ### System dependencies

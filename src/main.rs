@@ -30,6 +30,7 @@ use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
+use llama_cpp_2::{LlamaBackendDeviceType, list_llama_ggml_backend_devices};
 use llama_cpp_2::{LogOptions, send_logs_to_tracing};
 
 const MODEL_URL: &str = "https://huggingface.co/bartowski/Qwen_Qwen3-1.7B-GGUF/resolve/main/Qwen_Qwen3-1.7B-Q4_K_M.gguf";
@@ -47,6 +48,7 @@ const SAMPLING_TEMP: f32 = 0.7;
 const SAMPLING_PRESENCE_PENALTY: f32 = 1.5;
 const PENALTY_LAST_N: i32 = 256;
 const FINAL_TAIL_LINES: usize = 40;
+const ROLLING_EXACT_CHECK_MARGIN: i32 = 128;
 
 /// How to handle input that exceeds the model's context window.
 #[derive(Clone, Copy, Debug)]
@@ -241,6 +243,54 @@ fn print_summary(summary: &str) -> Result<()> {
 
     io::stdout().flush()?;
     Ok(())
+}
+
+fn detect_gpu_warning(backend: &LlamaBackend) -> Option<String> {
+    if backend.supports_gpu_offload() {
+        return None;
+    }
+
+    let built_with_gpu_backend =
+        cfg!(feature = "vulkan") || cfg!(feature = "cuda") || cfg!(feature = "metal");
+
+    if !built_with_gpu_backend {
+        return Some(
+            "smelt: warning: running without GPU offload; this binary was built without vulkan/cuda/metal support"
+                .to_string(),
+        );
+    }
+
+    let devices = list_llama_ggml_backend_devices();
+    let gpu_like_devices = devices
+        .iter()
+        .filter(|device| {
+            matches!(
+                device.device_type,
+                LlamaBackendDeviceType::Gpu
+                    | LlamaBackendDeviceType::IntegratedGpu
+                    | LlamaBackendDeviceType::Accelerator
+            )
+        })
+        .map(|device| {
+            if device.description.is_empty() {
+                device.name.clone()
+            } else {
+                format!("{} ({})", device.name, device.description)
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if gpu_like_devices.is_empty() {
+        Some(
+            "smelt: warning: running without GPU offload; no supported GPU backend device was found"
+                .to_string(),
+        )
+    } else {
+        Some(format!(
+            "smelt: warning: running without GPU offload despite detected devices: {}",
+            gpu_like_devices.join(", ")
+        ))
+    }
 }
 
 // ── Model download ─────────────────────────────────────────────
@@ -460,6 +510,8 @@ fn summarize_rolling_stream<R: BufRead>(
     let stream_compactions = io::stderr().is_terminal();
     let mut running_summary = String::new();
     let mut current_chunk = String::new();
+    let newline_tokens = token_count(model, "\n")?;
+    let mut current_chunk_tokens = 0i32;
     let mut compacted_chunks = 0usize;
     let mut tail_lines: VecDeque<String> = VecDeque::new();
     let mut total_lines = 0usize;
@@ -470,13 +522,31 @@ fn summarize_rolling_stream<R: BufRead>(
                             running_summary: &mut String,
                             compacted_chunks: &mut usize|
      -> Result<()> {
-        let candidate = if current_chunk.is_empty() {
-            line.to_string()
+        let line_tokens = token_count(model, line)?;
+        let estimated_candidate_tokens = if current_chunk.is_empty() {
+            line_tokens
         } else {
-            format!("{current_chunk}\n{line}")
+            current_chunk_tokens + newline_tokens + line_tokens
         };
+        let needs_exact_check =
+            estimated_candidate_tokens >= chunk_budget - ROLLING_EXACT_CHECK_MARGIN;
+        let exact_candidate_tokens = if needs_exact_check {
+            let candidate = if current_chunk.is_empty() {
+                line.to_string()
+            } else {
+                format!("{current_chunk}\n{line}")
+            };
+            let exact_tokens = token_count(model, &candidate)?;
+            Some((candidate, exact_tokens))
+        } else {
+            None
+        };
+        let candidate_overflows = exact_candidate_tokens
+            .as_ref()
+            .map(|(_, tokens)| *tokens > chunk_budget)
+            .unwrap_or(false);
 
-        if token_count(model, &candidate)? > chunk_budget && !current_chunk.is_empty() {
+        if candidate_overflows && !current_chunk.is_empty() {
             *compacted_chunks += 1;
             if !stream_compactions {
                 vprint!("\rsmelt: thinking... chunk {}", *compacted_chunks);
@@ -491,8 +561,17 @@ fn summarize_rolling_stream<R: BufRead>(
             }
 
             *current_chunk = line.to_string();
-        } else {
+            current_chunk_tokens = line_tokens;
+        } else if let Some((candidate, exact_tokens)) = exact_candidate_tokens {
             *current_chunk = candidate;
+            current_chunk_tokens = exact_tokens;
+        } else if current_chunk.is_empty() {
+            *current_chunk = line.to_string();
+            current_chunk_tokens = line_tokens;
+        } else {
+            current_chunk.push('\n');
+            current_chunk.push_str(line);
+            current_chunk_tokens = estimated_candidate_tokens;
         }
 
         total_lines += 1;
@@ -578,6 +657,10 @@ fn load_model() -> Result<(LlamaBackend, LlamaModel, std::time::Duration)> {
 
     let backend = LlamaBackend::init()?;
     send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
+
+    if let Some(warning) = detect_gpu_warning(&backend) {
+        eprintln!("{warning}");
+    }
 
     let model_params = LlamaModelParams::default().with_n_gpu_layers(1000);
     let model_params = std::pin::pin!(model_params);
