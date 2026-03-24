@@ -1,4 +1,5 @@
-use std::io::{self, Read, Write};
+use std::collections::VecDeque;
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,6 +47,7 @@ const SAMPLING_MIN_P: f32 = 0.0;
 const SAMPLING_TEMP: f32 = 0.7;
 const SAMPLING_PRESENCE_PENALTY: f32 = 1.5;
 const PENALTY_LAST_N: i32 = 256;
+const FINAL_TAIL_LINES: usize = 40;
 
 /// How to handle input that exceeds the model's context window.
 #[derive(Clone, Copy, Debug)]
@@ -107,6 +109,8 @@ Rules:
 - Keep the answer extremely short (but complete).
 - No markdown.
 - Prefer one sentence. Never exceed three short lines.
+- Prefer the final outcome over intermediate progress.
+- For builds and tests, say whether they passed or failed when the output reveals that.
 - Never ask for more input.
 - If the command output is insufficient, reply only with \"smelt: Insufficient information to output anything.\"
 - If the source is already shorter than your answer would be, prefer a minimal answer or reuse the source wording.";
@@ -138,6 +142,49 @@ fn build_rolling_prompt(instruction: &str, running_summary: &str, chunk: &str) -
          <|im_start|>user\n{user_msg}<|im_end|>\n\
          <|im_start|>assistant\n<think>\n\n</think>\n\n"
     )
+}
+
+/// Build a final reconciliation prompt for rolling mode using the running summary and raw tail.
+fn build_rolling_finalize_prompt(
+    instruction: &str,
+    running_summary: &str,
+    raw_tail: &str,
+) -> String {
+    let user_msg = format!(
+        "Produce the final summary of the full command output.\n\
+         Prioritize the final outcome over intermediate progress.\n\
+         For tests and builds, explicitly state pass/fail and counts when present.\n\
+         If later lines contradict earlier summary, trust the later lines.\n\n\
+         Original instruction:\n{instruction}\n\n\
+         Running summary so far:\n{running_summary}\n\n\
+         Last raw lines:\n{raw_tail}\n/no_think"
+    );
+
+    format!(
+        "<|im_start|>system\n{SYSTEM_PROMPT}<|im_end|>\n\
+         <|im_start|>user\n{user_msg}<|im_end|>\n\
+         <|im_start|>assistant\n<think>\n\n</think>\n\n"
+    )
+}
+
+fn push_tail_line(tail_lines: &mut VecDeque<String>, line: &str) {
+    tail_lines.push_back(line.to_string());
+    if tail_lines.len() > FINAL_TAIL_LINES {
+        tail_lines.pop_front();
+    }
+}
+
+fn finalize_rolling_summary(
+    model: &LlamaModel,
+    ctx: &mut llama_cpp_2::context::LlamaContext,
+    instruction: &str,
+    running_summary: &str,
+    tail_lines: &VecDeque<String>,
+) -> Result<String> {
+    let raw_tail = tail_lines.iter().map(String::as_str).collect::<Vec<_>>().join("\n");
+    let prompt = build_rolling_finalize_prompt(instruction, running_summary, &raw_tail);
+    ctx.clear_kv_cache();
+    infer(model, ctx, &prompt).map(|s| s.trim().to_string())
 }
 
 // ── Model download ─────────────────────────────────────────────
@@ -369,21 +416,157 @@ fn summarize_rolling(
 
     // Process chunks sequentially
     let mut running_summary = String::new();
+    let stream_compactions = io::stderr().is_terminal();
+    let mut tail_lines: VecDeque<String> = VecDeque::new();
 
     for (i, chunk) in chunks.iter().enumerate() {
-        vprint!(
-            "\rsmelt: thinking... chunk {}/{}",
-            i + 1,
-            chunks.len()
-        );
+        for line in chunk.lines() {
+            push_tail_line(&mut tail_lines, line);
+        }
+
+        if !stream_compactions {
+            vprint!(
+                "\rsmelt: thinking... chunk {}/{}",
+                i + 1,
+                chunks.len()
+            );
+        }
 
         let prompt = build_rolling_prompt(instruction, &running_summary, chunk);
         ctx.clear_kv_cache();
         running_summary = infer(model, ctx, &prompt)?.trim().to_string();
+
+        if stream_compactions && !running_summary.is_empty() {
+            eprintln!("{running_summary}");
+        }
     }
     vprintln!();
 
-    Ok(running_summary)
+    finalize_rolling_summary(model, ctx, instruction, &running_summary, &tail_lines)
+}
+
+/// Streaming rolling strategy: read stdin incrementally and compact chunks as they fill.
+fn summarize_rolling_stream<R: BufRead>(
+    model: &LlamaModel,
+    ctx: &mut llama_cpp_2::context::LlamaContext,
+    reader: &mut R,
+    first_line: String,
+    instruction: &str,
+    ctx_size: u32,
+) -> Result<String> {
+    // Budget per chunk: context minus template, generation, and room for running summary
+    let summary_reserve: i32 = MAX_OUTPUT_TOKENS;
+    let chunk_budget = max_input_tokens(ctx_size) - summary_reserve;
+
+    if chunk_budget <= 0 {
+        let mut input = first_line;
+        reader
+            .read_to_string(&mut input)
+            .context("failed to read stdin")?;
+        return summarize_tail(model, ctx, &input, instruction, ctx_size);
+    }
+
+    let stream_compactions = io::stderr().is_terminal();
+    let mut running_summary = String::new();
+    let mut current_chunk = String::new();
+    let mut compacted_chunks = 0usize;
+    let mut tail_lines: VecDeque<String> = VecDeque::new();
+
+    let mut process_line = |line: &str,
+                            current_chunk: &mut String,
+                            running_summary: &mut String,
+                            compacted_chunks: &mut usize|
+     -> Result<()> {
+        let candidate = if current_chunk.is_empty() {
+            line.to_string()
+        } else {
+            format!("{current_chunk}\n{line}")
+        };
+
+        if token_count(model, &candidate)? > chunk_budget && !current_chunk.is_empty() {
+            *compacted_chunks += 1;
+            if !stream_compactions {
+                vprint!("\rsmelt: thinking... chunk {}", *compacted_chunks);
+            }
+
+            let prompt = build_rolling_prompt(instruction, running_summary, current_chunk);
+            ctx.clear_kv_cache();
+            *running_summary = infer(model, ctx, &prompt)?.trim().to_string();
+
+            if stream_compactions && !running_summary.is_empty() {
+                eprintln!("{running_summary}");
+            }
+
+            *current_chunk = line.to_string();
+        } else {
+            *current_chunk = candidate;
+        }
+
+        push_tail_line(&mut tail_lines, line);
+
+        Ok(())
+    };
+
+    process_line(
+        first_line.trim_end_matches(['\r', '\n']),
+        &mut current_chunk,
+        &mut running_summary,
+        &mut compacted_chunks,
+    )?;
+
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader
+            .read_line(&mut line)
+            .context("failed to read stdin")?
+            == 0
+        {
+            break;
+        }
+
+        process_line(
+            line.trim_end_matches(['\r', '\n']),
+            &mut current_chunk,
+            &mut running_summary,
+            &mut compacted_chunks,
+        )?;
+    }
+
+    if compacted_chunks == 0 {
+        return infer(model, ctx, &build_prompt(instruction, &current_chunk));
+    }
+
+    if !current_chunk.is_empty() {
+        let prompt = build_rolling_prompt(instruction, &running_summary, &current_chunk);
+        ctx.clear_kv_cache();
+        running_summary = infer(model, ctx, &prompt)?.trim().to_string();
+    }
+
+    finalize_rolling_summary(model, ctx, instruction, &running_summary, &tail_lines)
+}
+
+fn load_model_and_context(
+    _ctx_size: u32,
+) -> Result<(LlamaBackend, LlamaModel, std::time::Duration)> {
+    let model_path = ensure_model()?;
+
+    let t_load = Instant::now();
+    vprint!("smelt: loading model... ");
+
+    let backend = LlamaBackend::init()?;
+    send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
+
+    let model_params = LlamaModelParams::default().with_n_gpu_layers(1000);
+    let model_params = std::pin::pin!(model_params);
+
+    let model = LlamaModel::load_from_file(&backend, &model_path, &model_params)
+        .context("unable to load model")?;
+
+    let load_time = t_load.elapsed();
+    vprintln!("done ({:.1}s)", load_time.as_secs_f32());
+
+    Ok((backend, model, load_time))
 }
 
 // ── Main ───────────────────────────────────────────────────────
@@ -436,6 +619,64 @@ fn main() -> Result<()> {
     let instruction = parse_str_arg(&args, "--prompt")
         .unwrap_or(DEFAULT_PROMPT);
 
+    if matches!(strategy, Strategy::Rolling) && head_n.is_none() && tail_n.is_none() {
+        let stdin = io::stdin();
+        let mut reader = stdin.lock();
+        let mut first_line = String::new();
+
+        if reader
+            .read_line(&mut first_line)
+            .context("failed to read stdin")?
+            == 0
+        {
+            return Ok(());
+        }
+
+        let t_total = Instant::now();
+        let (backend, model, load_time) = load_model_and_context(ctx_size)?;
+        let ctx_params = LlamaContextParams::default()
+            .with_n_ctx(Some(NonZeroU32::new(ctx_size).unwrap()))
+            .with_n_batch(ctx_size);
+        let mut ctx = model
+            .new_context(&backend, ctx_params)
+            .context("unable to create context")?;
+
+        let t_infer = Instant::now();
+        vprint!("smelt: thinking... ");
+
+        let result = summarize_rolling_stream(
+            &model,
+            &mut ctx,
+            &mut reader,
+            first_line,
+            instruction,
+            ctx_size,
+        )?;
+
+        let infer_time = t_infer.elapsed();
+        let total_time = t_total.elapsed();
+
+        vprintln!(
+            "done ({:.1}s)",
+            infer_time.as_secs_f32(),
+        );
+
+        let trimmed = result.trim();
+        if !trimmed.is_empty() {
+            println!("{trimmed}");
+        }
+
+        vprintln!(
+            "smelt: total {:.1}s (load {:.1}s, inference {:.1}s) [strategy: {strategy:?}]",
+            total_time.as_secs_f32(),
+            load_time.as_secs_f32(),
+            infer_time.as_secs_f32()
+        );
+
+        io::stdout().flush()?;
+        return Ok(());
+    }
+
     // ── Read stdin ──────────────────────────────────────────────
     let mut input = String::new();
     io::stdin()
@@ -467,24 +708,7 @@ fn main() -> Result<()> {
 
     // ── Load model ─────────────────────────────────────────────
     let t_total = Instant::now();
-    let model_path = ensure_model()?;
-
-    let t_load = Instant::now();
-    vprint!("smelt: loading model... ");
-
-    let backend = LlamaBackend::init()?;
-    send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
-
-    let model_params = LlamaModelParams::default().with_n_gpu_layers(1000);
-    let model_params = std::pin::pin!(model_params);
-
-    let model = LlamaModel::load_from_file(&backend, &model_path, &model_params)
-        .context("unable to load model")?;
-
-    let load_time = t_load.elapsed();
-    vprintln!("done ({:.1}s)", load_time.as_secs_f32());
-
-    // ── Create context ─────────────────────────────────────────
+    let (backend, model, load_time) = load_model_and_context(ctx_size)?;
     let ctx_params = LlamaContextParams::default()
         .with_n_ctx(Some(NonZeroU32::new(ctx_size).unwrap()))
         .with_n_batch(ctx_size);

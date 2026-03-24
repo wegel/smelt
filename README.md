@@ -33,7 +33,7 @@ When input exceeds the model's context window, smelt has two strategies for hand
 Keeps the last N lines that fit in context, summarizes once. Fast. Best when the end of output has the verdict (build result, test pass/fail, error messages).
 
 **`--rolling`**
-Processes the input in chunks sequentially, carrying a running summary forward into each next chunk. Slower (one inference per chunk) but captures information from the entire output.
+Processes the input in chunks sequentially, carrying a running summary forward into each next chunk. Slower (one inference per chunk) but captures information from the entire output. When stderr is attached to a terminal, smelt also streams each intermediate compaction there as it goes, without waiting for EOF.
 
 ```sh
 # Long build log — just care about the result
