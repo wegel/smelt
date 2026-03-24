@@ -1,0 +1,19 @@
+[package]
+name = "smlt"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+llama-cpp-2 = "0.1"
+ureq = "3"
+anyhow = "1"
+encoding_rs = "0.8"
+dirs = "6"
+indicatif = "0.17"
+tracing-subscriber = "0.3.23"
+
+[features]
+default = []
+cuda = ["llama-cpp-2/cuda"]
+vulkan = ["llama-cpp-2/vulkan"]
+metal = ["llama-cpp-2/metal"]
