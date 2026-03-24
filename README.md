@@ -1,16 +1,16 @@
-# smlt (smelt)
+# smelt
 
 Compress verbose command output into concise summaries using a local LLM. No API keys, no external services — runs entirely on your machine.
 
 ```
-cargo build --release 2>&1 | smlt
+cargo build --release 2>&1 | smelt
 ```
 
-> smlt v0.1.0 compiled, optimized, release profile in 0.92s.
+> smelt v0.1.0 compiled, optimized, release profile in 0.92s.
 
 ## How it works
 
-smlt reads stdin, feeds it through a small local model (Qwen2.5 1.5B, Q4 quantized), and outputs a one-sentence summary. The model is automatically downloaded on first run (~1.1GB) to `~/.local/share/smlt/models/`.
+smelt reads stdin, feeds it through a small local model (Qwen2.5 1.5B, Q4 quantized), and outputs a one-sentence summary. The model is automatically downloaded on first run (~1.1GB) to `~/.local/share/smelt/models/`.
 
 Inference runs on GPU via Vulkan, CUDA, or Metal. On CPU it works but is significantly slower.
 
@@ -46,18 +46,18 @@ sudo apt install libvulkan-dev glslang-tools
 
 ## Usage
 
-Pipe any command through smlt:
+Pipe any command through smelt:
 
 ```sh
-npm install 2>&1 | smlt
-cargo test 2>&1 | smlt
-kubectl get pods -A | smlt
-git log --oneline -50 | smlt
+npm install 2>&1 | smelt
+cargo test 2>&1 | smelt
+kubectl get pods -A | smelt
+git log --oneline -50 | smelt
 ```
 
 ### Strategies
 
-When input exceeds the model's context window, smlt has two strategies for handling it:
+When input exceeds the model's context window, smelt has two strategies for handling it:
 
 **`--last`** (default)
 Keeps the last N lines that fit in context, summarizes once. Fast. Best when the end of output has the verdict (build result, test pass/fail, error messages).
@@ -67,10 +67,10 @@ Processes the input in chunks sequentially, carrying a running summary forward i
 
 ```sh
 # Long build log — just care about the result
-make 2>&1 | smlt --last
+make 2>&1 | smelt --last
 
 # Long test suite — want to know about all failures
-pytest -v 2>&1 | smlt --rolling
+pytest -v 2>&1 | smelt --rolling
 ```
 
 ### Passthrough
@@ -79,10 +79,10 @@ Use `--head` and `--tail` to pass through raw lines without summarization, like 
 
 ```sh
 # First and last 5 lines
-some-command 2>&1 | smlt --head 5 --tail 5
+some-command 2>&1 | smelt --head 5 --tail 5
 
 # Just the last 10 lines
-some-command 2>&1 | smlt --tail 10
+some-command 2>&1 | smelt --tail 10
 ```
 
 ### Options
@@ -111,7 +111,7 @@ Model load is ~0.8s (cached). Inference runs at ~50 tokens/s on GPU.
 
 ## Model
 
-Uses [Qwen2.5-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF) (Q4_K_M quantization, ~1.1GB). Downloaded automatically to `~/.local/share/smlt/models/` on first run.
+Uses [Qwen2.5-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF) (Q4_K_M quantization, ~1.1GB). Downloaded automatically to `~/.local/share/smelt/models/` on first run.
 
 ## License
 

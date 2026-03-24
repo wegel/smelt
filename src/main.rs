@@ -100,7 +100,7 @@ Rules:
 - No markdown.
 - Prefer one sentence. Never exceed three short lines.
 - Never ask for more input.
-- If the command output is insufficient, reply only with \"smlt: Insufficient information to output anything.\"
+- If the command output is insufficient, reply only with \"smelt: Insufficient information to output anything.\"
 - If the source is already shorter than your answer would be, prefer a minimal answer or reuse the source wording.";
 
 const DEFAULT_PROMPT: &str = "Summarize this command output:";
@@ -137,7 +137,7 @@ fn build_rolling_prompt(instruction: &str, running_summary: &str, chunk: &str) -
 fn models_dir() -> Result<PathBuf> {
     let base = dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."));
-    let dir = base.join("smlt").join("models");
+    let dir = base.join("smelt").join("models");
     std::fs::create_dir_all(&dir)
         .context("failed to create models directory")?;
     Ok(dir)
@@ -150,7 +150,7 @@ fn ensure_model() -> Result<PathBuf> {
         return Ok(model_path);
     }
 
-    eprintln!("smlt: downloading model to {}", model_path.display());
+    eprintln!("smelt: downloading model to {}", model_path.display());
 
     let resp = ureq::get(MODEL_URL)
         .call()
@@ -176,7 +176,7 @@ fn ensure_model() -> Result<PathBuf> {
         file.write_all(&buf[..n]).context("write failed")?;
         downloaded += n as u64;
         if total > 0 {
-            eprint!("\rsmlt: downloading... {:.0}%", downloaded as f64 / total as f64 * 100.0);
+            eprint!("\rsmelt: downloading... {:.0}%", downloaded as f64 / total as f64 * 100.0);
         }
     }
     eprintln!();
@@ -184,7 +184,7 @@ fn ensure_model() -> Result<PathBuf> {
     std::fs::rename(&tmp_path, &model_path)
         .context("failed to move downloaded model into place")?;
 
-    eprintln!("smlt: model saved to {}", model_path.display());
+    eprintln!("smelt: model saved to {}", model_path.display());
     Ok(model_path)
 }
 
@@ -297,7 +297,7 @@ fn summarize_tail(
     let truncated: String = lines[best_start..].join("\n");
     let kept = lines.len() - best_start;
     vprintln!(
-        "smlt: input truncated to last {kept}/{} lines",
+        "smelt: input truncated to last {kept}/{} lines",
         lines.len()
     );
 
@@ -351,7 +351,7 @@ fn summarize_rolling(
     }
 
     vprintln!(
-        "smlt: rolling summary over {} chunks",
+        "smelt: rolling summary over {} chunks",
         chunks.len()
     );
 
@@ -360,7 +360,7 @@ fn summarize_rolling(
 
     for (i, chunk) in chunks.iter().enumerate() {
         vprint!(
-            "\rsmlt: thinking... chunk {}/{}",
+            "\rsmelt: thinking... chunk {}/{}",
             i + 1,
             chunks.len()
         );
@@ -378,10 +378,10 @@ fn summarize_rolling(
 
 fn print_help() {
     eprintln!("\
-smlt (smelt) — compress command output using a local LLM
+smelt — compress command output using a local LLM
 
 USAGE:
-    command | smlt [OPTIONS]
+    command | smelt [OPTIONS]
 
 OPTIONS:
     --last            Summarize only the tail of the input (default)
@@ -395,10 +395,10 @@ OPTIONS:
     --version         Show version
 
 EXAMPLES:
-    cargo build 2>&1 | smlt
-    npm test 2>&1 | smlt --rolling
-    cargo build 2>&1 | smlt --head 5 --tail 3
-    kubectl get pods -A | smlt --ctx-size 16384");
+    cargo build 2>&1 | smelt
+    npm test 2>&1 | smelt --rolling
+    cargo build 2>&1 | smelt --head 5 --tail 3
+    kubectl get pods -A | smelt --ctx-size 16384");
 }
 
 fn main() -> Result<()> {
@@ -409,7 +409,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        eprintln!("smlt {}", env!("CARGO_PKG_VERSION"));
+        eprintln!("smelt {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 
@@ -458,7 +458,7 @@ fn main() -> Result<()> {
     let model_path = ensure_model()?;
 
     let t_load = Instant::now();
-    vprint!("smlt: loading model... ");
+    vprint!("smelt: loading model... ");
 
     let backend = LlamaBackend::init()?;
     send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
@@ -482,7 +482,7 @@ fn main() -> Result<()> {
 
     // ── Summarize ──────────────────────────────────────────────
     let t_infer = Instant::now();
-    vprint!("smlt: thinking... ");
+    vprint!("smelt: thinking... ");
 
     let result = match strategy {
         Strategy::Tail => summarize_tail(&model, &mut ctx, &input, instruction, ctx_size)?,
@@ -504,7 +504,7 @@ fn main() -> Result<()> {
     }
 
     vprintln!(
-        "smlt: total {:.1}s (load {:.1}s, inference {:.1}s) [strategy: {strategy:?}]",
+        "smelt: total {:.1}s (load {:.1}s, inference {:.1}s) [strategy: {strategy:?}]",
         total_time.as_secs_f32(),
         load_time.as_secs_f32(),
         infer_time.as_secs_f32()
