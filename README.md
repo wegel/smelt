@@ -43,15 +43,15 @@ make 2>&1 | smelt --last
 pytest -v 2>&1 | smelt --rolling
 ```
 
-### Passthrough
+### Raw Context
 
-Use `--head` and `--tail` to pass through raw lines without summarization, like the unix utilities:
+Use `--head` and `--tail` to include raw lines around the summary:
 
 ```sh
-# First and last 5 lines
+# First and last 5 raw lines, with the summary in between
 some-command 2>&1 | smelt --head 5 --tail 5
 
-# Just the last 10 lines
+# Summary, then the last 10 raw lines
 some-command 2>&1 | smelt --tail 10
 ```
 
@@ -61,8 +61,8 @@ some-command 2>&1 | smelt --tail 10
 |------|---------|-------------|
 | `--last` | yes | Summarize only the tail of the input |
 | `--rolling` | | Rolling summary over the full input |
-| `--head N` | | Passthrough first N lines (no LLM) |
-| `--tail N` | | Passthrough last N lines (no LLM) |
+| `--head N` | | Include the first N raw lines before the summary |
+| `--tail N` | | Include the last N raw lines after the summary |
 | `--prompt TEXT` | "Summarize this command output:" | Custom instruction prompt |
 | `--ctx-size N` | 8192 | Context window size in tokens |
 | `-v, --verbose` | | Show timing and progress on stderr |

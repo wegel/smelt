@@ -30,10 +30,9 @@ use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
-use llama_cpp_2::{send_logs_to_tracing, LogOptions};
+use llama_cpp_2::{LogOptions, send_logs_to_tracing};
 
-const MODEL_URL: &str =
-    "https://huggingface.co/bartowski/Qwen_Qwen3-1.7B-GGUF/resolve/main/Qwen_Qwen3-1.7B-Q4_K_M.gguf";
+const MODEL_URL: &str = "https://huggingface.co/bartowski/Qwen_Qwen3-1.7B-GGUF/resolve/main/Qwen_Qwen3-1.7B-Q4_K_M.gguf";
 const MODEL_FILE: &str = "Qwen_Qwen3-1.7B-Q4_K_M.gguf";
 
 const MAX_OUTPUT_TOKENS: i32 = 200;
@@ -167,13 +166,6 @@ fn build_rolling_finalize_prompt(
     )
 }
 
-fn push_tail_line(tail_lines: &mut VecDeque<String>, line: &str) {
-    tail_lines.push_back(line.to_string());
-    if tail_lines.len() > FINAL_TAIL_LINES {
-        tail_lines.pop_front();
-    }
-}
-
 fn finalize_rolling_summary(
     model: &LlamaModel,
     ctx: &mut llama_cpp_2::context::LlamaContext,
@@ -181,20 +173,82 @@ fn finalize_rolling_summary(
     running_summary: &str,
     tail_lines: &VecDeque<String>,
 ) -> Result<String> {
-    let raw_tail = tail_lines.iter().map(String::as_str).collect::<Vec<_>>().join("\n");
+    let raw_tail = tail_lines
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("\n");
     let prompt = build_rolling_finalize_prompt(instruction, running_summary, &raw_tail);
     ctx.clear_kv_cache();
     infer(model, ctx, &prompt).map(|s| s.trim().to_string())
 }
 
+struct RollingOutput {
+    summary: String,
+    total_lines: usize,
+    tail_lines: VecDeque<String>,
+    streamed_head_lines: usize,
+}
+
+#[derive(Clone, Copy)]
+struct RollingConfig<'a> {
+    instruction: &'a str,
+    ctx_size: u32,
+    head_n: Option<usize>,
+    tail_n: Option<usize>,
+}
+
+struct SummaryOutput<'a> {
+    summary: &'a str,
+    total_lines: usize,
+    tail_lines: &'a [&'a str],
+    streamed_head_lines: usize,
+}
+
+fn print_summary_output(
+    output: SummaryOutput<'_>,
+    head_n: Option<usize>,
+    tail_n: Option<usize>,
+) -> Result<()> {
+    let trimmed = output.summary.trim();
+    if !trimmed.is_empty() {
+        println!("{trimmed}");
+    }
+
+    let requested_tail = tail_n.unwrap_or(0);
+    if requested_tail > 0 && !output.tail_lines.is_empty() {
+        let h = output
+            .streamed_head_lines
+            .max(head_n.unwrap_or(0).min(output.total_lines));
+        let tail_start = output.total_lines.saturating_sub(requested_tail).max(h);
+        let tail_buffer_start = output.total_lines.saturating_sub(output.tail_lines.len());
+        let skip = tail_start.saturating_sub(tail_buffer_start);
+
+        for line in output.tail_lines.iter().skip(skip) {
+            println!("{line}");
+        }
+    }
+
+    io::stdout().flush()?;
+    Ok(())
+}
+
+fn print_summary(summary: &str) -> Result<()> {
+    let trimmed = summary.trim();
+    if !trimmed.is_empty() {
+        println!("{trimmed}");
+    }
+
+    io::stdout().flush()?;
+    Ok(())
+}
+
 // ── Model download ─────────────────────────────────────────────
 
 fn models_dir() -> Result<PathBuf> {
-    let base = dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."));
+    let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
     let dir = base.join("smelt").join("models");
-    std::fs::create_dir_all(&dir)
-        .context("failed to create models directory")?;
+    std::fs::create_dir_all(&dir).context("failed to create models directory")?;
     Ok(dir)
 }
 
@@ -211,15 +265,16 @@ fn ensure_model() -> Result<PathBuf> {
         .call()
         .context("failed to download model")?;
 
-    let total: u64 = resp.headers().get("content-length")
+    let total: u64 = resp
+        .headers()
+        .get("content-length")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
     // Write to a temp file first, then rename (atomic-ish)
     let tmp_path = model_path.with_extension("gguf.part");
-    let mut file = std::fs::File::create(&tmp_path)
-        .context("failed to create temp file")?;
+    let mut file = std::fs::File::create(&tmp_path).context("failed to create temp file")?;
 
     let mut reader = resp.into_body().into_reader();
     let mut downloaded: u64 = 0;
@@ -227,11 +282,16 @@ fn ensure_model() -> Result<PathBuf> {
 
     loop {
         let n = reader.read(&mut buf).context("download read failed")?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         file.write_all(&buf[..n]).context("write failed")?;
         downloaded += n as u64;
         if total > 0 {
-            eprint!("\rsmelt: downloading... {:.0}%", downloaded as f64 / total as f64 * 100.0);
+            eprint!(
+                "\rsmelt: downloading... {:.0}%",
+                downloaded as f64 / total as f64 * 100.0
+            );
         }
     }
     eprintln!();
@@ -364,106 +424,37 @@ fn summarize_tail(
     infer(model, ctx, &build_prompt(instruction, &truncated))
 }
 
-/// Rolling strategy: chunk input, summarize sequentially with carry-forward.
-fn summarize_rolling(
-    model: &LlamaModel,
-    ctx: &mut llama_cpp_2::context::LlamaContext,
-    input: &str,
-    instruction: &str,
-    ctx_size: u32,
-) -> Result<String> {
-    // Budget per chunk: context minus template, generation, and room for running summary
-    let summary_reserve: i32 = MAX_OUTPUT_TOKENS; // previous summary could be this long
-    let chunk_budget = max_input_tokens(ctx_size) - summary_reserve;
-
-    if chunk_budget <= 0 {
-        // Context too small for rolling, fall back to tail
-        return summarize_tail(model, ctx, input, instruction, ctx_size);
-    }
-
-    // Split input into chunks that each fit within chunk_budget tokens
-    let lines: Vec<&str> = input.lines().collect();
-    let mut chunks: Vec<String> = Vec::new();
-    let mut current_chunk = String::new();
-
-    for line in &lines {
-        let candidate = if current_chunk.is_empty() {
-            line.to_string()
-        } else {
-            format!("{current_chunk}\n{line}")
-        };
-
-        if token_count(model, &candidate)? > chunk_budget && !current_chunk.is_empty() {
-            chunks.push(current_chunk);
-            current_chunk = line.to_string();
-        } else {
-            current_chunk = candidate;
-        }
-    }
-    if !current_chunk.is_empty() {
-        chunks.push(current_chunk);
-    }
-
-    // If it fits in one chunk, just do a single pass
-    if chunks.len() == 1 {
-        return infer(model, ctx, &build_prompt(instruction, &chunks[0]));
-    }
-
-    vprintln!(
-        "smelt: rolling summary over {} chunks",
-        chunks.len()
-    );
-
-    // Process chunks sequentially
-    let mut running_summary = String::new();
-    let stream_compactions = io::stderr().is_terminal();
-    let mut tail_lines: VecDeque<String> = VecDeque::new();
-
-    for (i, chunk) in chunks.iter().enumerate() {
-        for line in chunk.lines() {
-            push_tail_line(&mut tail_lines, line);
-        }
-
-        if !stream_compactions {
-            vprint!(
-                "\rsmelt: thinking... chunk {}/{}",
-                i + 1,
-                chunks.len()
-            );
-        }
-
-        let prompt = build_rolling_prompt(instruction, &running_summary, chunk);
-        ctx.clear_kv_cache();
-        running_summary = infer(model, ctx, &prompt)?.trim().to_string();
-
-        if stream_compactions && !running_summary.is_empty() {
-            eprintln!("{running_summary}");
-        }
-    }
-    vprintln!();
-
-    finalize_rolling_summary(model, ctx, instruction, &running_summary, &tail_lines)
-}
-
 /// Streaming rolling strategy: read stdin incrementally and compact chunks as they fill.
 fn summarize_rolling_stream<R: BufRead>(
     model: &LlamaModel,
     ctx: &mut llama_cpp_2::context::LlamaContext,
     reader: &mut R,
     first_line: String,
-    instruction: &str,
-    ctx_size: u32,
-) -> Result<String> {
+    config: RollingConfig<'_>,
+) -> Result<RollingOutput> {
     // Budget per chunk: context minus template, generation, and room for running summary
     let summary_reserve: i32 = MAX_OUTPUT_TOKENS;
-    let chunk_budget = max_input_tokens(ctx_size) - summary_reserve;
+    let chunk_budget = max_input_tokens(config.ctx_size) - summary_reserve;
+    let tail_capacity = FINAL_TAIL_LINES.max(config.tail_n.unwrap_or(0));
 
     if chunk_budget <= 0 {
         let mut input = first_line;
         reader
             .read_to_string(&mut input)
             .context("failed to read stdin")?;
-        return summarize_tail(model, ctx, &input, instruction, ctx_size);
+        let summary = summarize_tail(model, ctx, &input, config.instruction, config.ctx_size)?;
+        let lines: Vec<String> = input.lines().map(|s| s.to_string()).collect();
+        let h = config.head_n.unwrap_or(0).min(lines.len());
+        let mut tail_lines = VecDeque::new();
+        for line in lines.iter().skip(lines.len().saturating_sub(tail_capacity)) {
+            tail_lines.push_back(line.clone());
+        }
+        return Ok(RollingOutput {
+            summary,
+            total_lines: lines.len(),
+            tail_lines,
+            streamed_head_lines: h,
+        });
     }
 
     let stream_compactions = io::stderr().is_terminal();
@@ -471,6 +462,8 @@ fn summarize_rolling_stream<R: BufRead>(
     let mut current_chunk = String::new();
     let mut compacted_chunks = 0usize;
     let mut tail_lines: VecDeque<String> = VecDeque::new();
+    let mut total_lines = 0usize;
+    let mut streamed_head_lines = 0usize;
 
     let mut process_line = |line: &str,
                             current_chunk: &mut String,
@@ -489,7 +482,7 @@ fn summarize_rolling_stream<R: BufRead>(
                 vprint!("\rsmelt: thinking... chunk {}", *compacted_chunks);
             }
 
-            let prompt = build_rolling_prompt(instruction, running_summary, current_chunk);
+            let prompt = build_rolling_prompt(config.instruction, running_summary, current_chunk);
             ctx.clear_kv_cache();
             *running_summary = infer(model, ctx, &prompt)?.trim().to_string();
 
@@ -502,7 +495,16 @@ fn summarize_rolling_stream<R: BufRead>(
             *current_chunk = candidate;
         }
 
-        push_tail_line(&mut tail_lines, line);
+        total_lines += 1;
+        if streamed_head_lines < config.head_n.unwrap_or(0) {
+            println!("{line}");
+            io::stdout().flush()?;
+            streamed_head_lines += 1;
+        }
+        tail_lines.push_back(line.to_string());
+        if tail_lines.len() > tail_capacity {
+            tail_lines.pop_front();
+        }
 
         Ok(())
     };
@@ -534,21 +536,41 @@ fn summarize_rolling_stream<R: BufRead>(
     }
 
     if compacted_chunks == 0 {
-        return infer(model, ctx, &build_prompt(instruction, &current_chunk));
+        let summary = infer(
+            model,
+            ctx,
+            &build_prompt(config.instruction, &current_chunk),
+        )?;
+        return Ok(RollingOutput {
+            summary,
+            total_lines,
+            tail_lines,
+            streamed_head_lines,
+        });
     }
 
     if !current_chunk.is_empty() {
-        let prompt = build_rolling_prompt(instruction, &running_summary, &current_chunk);
+        let prompt = build_rolling_prompt(config.instruction, &running_summary, &current_chunk);
         ctx.clear_kv_cache();
         running_summary = infer(model, ctx, &prompt)?.trim().to_string();
     }
 
-    finalize_rolling_summary(model, ctx, instruction, &running_summary, &tail_lines)
+    let summary = finalize_rolling_summary(
+        model,
+        ctx,
+        config.instruction,
+        &running_summary,
+        &tail_lines,
+    )?;
+    Ok(RollingOutput {
+        summary,
+        total_lines,
+        tail_lines,
+        streamed_head_lines,
+    })
 }
 
-fn load_model_and_context(
-    _ctx_size: u32,
-) -> Result<(LlamaBackend, LlamaModel, std::time::Duration)> {
+fn load_model() -> Result<(LlamaBackend, LlamaModel, std::time::Duration)> {
     let model_path = ensure_model()?;
 
     let t_load = Instant::now();
@@ -569,10 +591,25 @@ fn load_model_and_context(
     Ok((backend, model, load_time))
 }
 
+fn create_context<'a>(
+    backend: &'a LlamaBackend,
+    model: &'a LlamaModel,
+    ctx_size: u32,
+) -> Result<llama_cpp_2::context::LlamaContext<'a>> {
+    let ctx_params = LlamaContextParams::default()
+        .with_n_ctx(Some(NonZeroU32::new(ctx_size).unwrap()))
+        .with_n_batch(ctx_size);
+
+    model
+        .new_context(backend, ctx_params)
+        .context("unable to create context")
+}
+
 // ── Main ───────────────────────────────────────────────────────
 
 fn print_help() {
-    eprintln!("\
+    eprintln!(
+        "\
 smelt — compress command output using a local LLM
 
 USAGE:
@@ -581,8 +618,8 @@ USAGE:
 OPTIONS:
     --last            Summarize only the tail of the input (default)
     --rolling         Summarize the full input in sequential chunks
-    --head N          Passthrough first N lines (no summarization)
-    --tail N          Passthrough last N lines (no summarization)
+    --head N          Include the first N raw lines before the summary
+    --tail N          Include the last N raw lines after the summary
     --prompt TEXT     Set the instruction prompt (default: \"Summarize this command output:\")
     --ctx-size N      Context window size in tokens (default: 8192)
     -v, --verbose     Show timing and progress on stderr
@@ -593,7 +630,8 @@ EXAMPLES:
     cargo build 2>&1 | smelt
     npm test 2>&1 | smelt --rolling
     cargo build 2>&1 | smelt --head 5 --tail 3
-    kubectl get pods -A | smelt --ctx-size 16384");
+    kubectl get pods -A | smelt --ctx-size 16384"
+    );
 }
 
 fn main() -> Result<()> {
@@ -616,10 +654,9 @@ fn main() -> Result<()> {
     let ctx_size = parse_ctx_size(&args);
     let head_n = parse_usize_arg(&args, "--head");
     let tail_n = parse_usize_arg(&args, "--tail");
-    let instruction = parse_str_arg(&args, "--prompt")
-        .unwrap_or(DEFAULT_PROMPT);
+    let instruction = parse_str_arg(&args, "--prompt").unwrap_or(DEFAULT_PROMPT);
 
-    if matches!(strategy, Strategy::Rolling) && head_n.is_none() && tail_n.is_none() {
+    if matches!(strategy, Strategy::Rolling) {
         let stdin = io::stdin();
         let mut reader = stdin.lock();
         let mut first_line = String::new();
@@ -633,37 +670,44 @@ fn main() -> Result<()> {
         }
 
         let t_total = Instant::now();
-        let (backend, model, load_time) = load_model_and_context(ctx_size)?;
-        let ctx_params = LlamaContextParams::default()
-            .with_n_ctx(Some(NonZeroU32::new(ctx_size).unwrap()))
-            .with_n_batch(ctx_size);
-        let mut ctx = model
-            .new_context(&backend, ctx_params)
-            .context("unable to create context")?;
+        let (backend, model, load_time) = load_model()?;
+        let mut ctx = create_context(&backend, &model, ctx_size)?;
 
         let t_infer = Instant::now();
         vprint!("smelt: thinking... ");
 
-        let result = summarize_rolling_stream(
+        let output = summarize_rolling_stream(
             &model,
             &mut ctx,
             &mut reader,
             first_line,
-            instruction,
-            ctx_size,
+            RollingConfig {
+                instruction,
+                ctx_size,
+                head_n,
+                tail_n,
+            },
         )?;
 
         let infer_time = t_infer.elapsed();
         let total_time = t_total.elapsed();
 
-        vprintln!(
-            "done ({:.1}s)",
-            infer_time.as_secs_f32(),
-        );
+        vprintln!("done ({:.1}s)", infer_time.as_secs_f32(),);
 
-        let trimmed = result.trim();
-        if !trimmed.is_empty() {
-            println!("{trimmed}");
+        if head_n.is_some() || tail_n.is_some() {
+            let tail_lines: Vec<&str> = output.tail_lines.iter().map(String::as_str).collect();
+            print_summary_output(
+                SummaryOutput {
+                    summary: &output.summary,
+                    total_lines: output.total_lines,
+                    tail_lines: &tail_lines,
+                    streamed_head_lines: output.streamed_head_lines,
+                },
+                head_n,
+                tail_n,
+            )?;
+        } else {
+            print_summary(&output.summary)?;
         }
 
         vprintln!(
@@ -687,56 +731,43 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // ── Passthrough head/tail lines ─────────────────────────────
-    if head_n.is_some() || tail_n.is_some() {
-        let lines: Vec<&str> = input.lines().collect();
-        let h = head_n.unwrap_or(0).min(lines.len());
-        let t = tail_n.unwrap_or(0).min(lines.len().saturating_sub(h));
-
-        for line in &lines[..h] {
-            println!("{line}");
-        }
-        if h > 0 && t > 0 && h + t < lines.len() {
-            println!("... ({} lines omitted) ...", lines.len() - h - t);
-        }
-        for line in &lines[lines.len() - t..] {
-            println!("{line}");
-        }
-        io::stdout().flush()?;
-        return Ok(());
-    }
-
     // ── Load model ─────────────────────────────────────────────
     let t_total = Instant::now();
-    let (backend, model, load_time) = load_model_and_context(ctx_size)?;
-    let ctx_params = LlamaContextParams::default()
-        .with_n_ctx(Some(NonZeroU32::new(ctx_size).unwrap()))
-        .with_n_batch(ctx_size);
-    let mut ctx = model
-        .new_context(&backend, ctx_params)
-        .context("unable to create context")?;
+    let (backend, model, load_time) = load_model()?;
+    let mut ctx = create_context(&backend, &model, ctx_size)?;
 
     // ── Summarize ──────────────────────────────────────────────
     let t_infer = Instant::now();
     vprint!("smelt: thinking... ");
 
-    let result = match strategy {
-        Strategy::Tail => summarize_tail(&model, &mut ctx, &input, instruction, ctx_size)?,
-        Strategy::Rolling => summarize_rolling(&model, &mut ctx, &input, instruction, ctx_size)?,
-    };
+    debug_assert!(matches!(strategy, Strategy::Tail));
+    let result = summarize_tail(&model, &mut ctx, &input, instruction, ctx_size)?;
 
     let infer_time = t_infer.elapsed();
     let total_time = t_total.elapsed();
 
-    vprintln!(
-        "done ({:.1}s)",
-        infer_time.as_secs_f32(),
-    );
+    vprintln!("done ({:.1}s)", infer_time.as_secs_f32(),);
 
     // ── Output ─────────────────────────────────────────────────
-    let trimmed = result.trim();
-    if !trimmed.is_empty() {
-        println!("{trimmed}");
+    if head_n.is_some() || tail_n.is_some() {
+        let lines: Vec<&str> = input.lines().collect();
+        let h = head_n.unwrap_or(0).min(lines.len());
+        for line in &lines[..h] {
+            println!("{line}");
+        }
+        let tail_start = lines.len().saturating_sub(tail_n.unwrap_or(0)).max(h);
+        print_summary_output(
+            SummaryOutput {
+                summary: &result,
+                total_lines: lines.len(),
+                tail_lines: &lines[tail_start..],
+                streamed_head_lines: h,
+            },
+            head_n,
+            tail_n,
+        )?;
+    } else {
+        print_summary(&result)?;
     }
 
     vprintln!(
@@ -745,7 +776,5 @@ fn main() -> Result<()> {
         load_time.as_secs_f32(),
         infer_time.as_secs_f32()
     );
-
-    io::stdout().flush()?;
     Ok(())
 }
