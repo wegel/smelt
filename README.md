@@ -10,7 +10,7 @@ cargo build --release 2>&1 | smelt
 
 ## How it works
 
-smelt reads stdin, feeds it through a small local model (Qwen2.5 1.5B, Q4 quantized), and outputs a concise summary. Depending on the input and context, that may span more than one line. The model is automatically downloaded on first run (~1.1GB) to `~/.local/share/smelt/models/`.
+smelt reads stdin, feeds it through a small local model (Qwen3 1.7B, Q4 quantized), and outputs a concise summary. Depending on the input and context, that may span more than one line. The model is automatically downloaded on first run (~1.3GB) to `~/.local/share/smelt/models/`.
 
 Inference runs on GPU via Vulkan, CUDA, or Metal. On CPU it works but is significantly slower.
 
@@ -81,7 +81,7 @@ Model load is ~0.8s (cached). Inference runs at ~50 tokens/s on GPU.
 
 ## Model
 
-Uses [Qwen2.5-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF) (Q4_K_M quantization, ~1.1GB). Downloaded automatically to `~/.local/share/smelt/models/` on first run.
+Uses [bartowski/Qwen_Qwen3-1.7B-GGUF](https://huggingface.co/bartowski/Qwen_Qwen3-1.7B-GGUF) (`Q4_K_M`, ~1.3GB), based on Qwen3-1.7B. `smelt` runs it in non-thinking mode for faster, more direct summaries. Downloaded automatically to `~/.local/share/smelt/models/` on first run.
 
 ## Install
 

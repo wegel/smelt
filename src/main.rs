@@ -31,13 +31,21 @@ use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::{send_logs_to_tracing, LogOptions};
 
-const MODEL_URL: &str = "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf";
-const MODEL_FILE: &str = "qwen2.5-1.5b-instruct-q4_k_m.gguf";
+const MODEL_URL: &str =
+    "https://huggingface.co/bartowski/Qwen_Qwen3-1.7B-GGUF/resolve/main/Qwen_Qwen3-1.7B-Q4_K_M.gguf";
+const MODEL_FILE: &str = "Qwen_Qwen3-1.7B-Q4_K_M.gguf";
 
 const MAX_OUTPUT_TOKENS: i32 = 200;
 const DEFAULT_CTX_SIZE: u32 = 8192;
 // Reserve tokens for the ChatML template wrapping
 const TEMPLATE_OVERHEAD: i32 = 100;
+const SAMPLING_SEED: u32 = 42;
+const SAMPLING_TOP_K: i32 = 20;
+const SAMPLING_TOP_P: f32 = 0.8;
+const SAMPLING_MIN_P: f32 = 0.0;
+const SAMPLING_TEMP: f32 = 0.7;
+const SAMPLING_PRESENCE_PENALTY: f32 = 1.5;
+const PENALTY_LAST_N: i32 = 256;
 
 /// How to handle input that exceeds the model's context window.
 #[derive(Clone, Copy, Debug)]
@@ -105,30 +113,30 @@ Rules:
 
 const DEFAULT_PROMPT: &str = "Summarize this command output:";
 
-/// Build a ChatML-formatted prompt (Qwen2.5 chat template).
+/// Build a ChatML-formatted prompt for Qwen chat models.
 fn build_prompt(instruction: &str, input: &str) -> String {
     format!(
         "<|im_start|>system\n{SYSTEM_PROMPT}<|im_end|>\n\
-         <|im_start|>user\n{instruction}\n{input}<|im_end|>\n\
-         <|im_start|>assistant\n"
+         <|im_start|>user\n{instruction}\n{input}\n/no_think<|im_end|>\n\
+         <|im_start|>assistant\n<think>\n\n</think>\n\n"
     )
 }
 
 /// Build a rolling prompt that includes the running summary so far.
 fn build_rolling_prompt(instruction: &str, running_summary: &str, chunk: &str) -> String {
     let user_msg = if running_summary.is_empty() {
-        format!("{instruction}\n{chunk}")
+        format!("{instruction}\n{chunk}\n/no_think")
     } else {
         format!(
             "Here is your summary of the output so far:\n{running_summary}\n\n\
-             {instruction}\n{chunk}"
+             {instruction}\n{chunk}\n/no_think"
         )
     };
 
     format!(
         "<|im_start|>system\n{SYSTEM_PROMPT}<|im_end|>\n\
          <|im_start|>user\n{user_msg}<|im_end|>\n\
-         <|im_start|>assistant\n"
+         <|im_start|>assistant\n<think>\n\n</think>\n\n"
     )
 }
 
@@ -213,8 +221,12 @@ fn infer(
 
     // Generate
     let mut sampler = LlamaSampler::chain_simple([
-        LlamaSampler::temp(0.1),
-        LlamaSampler::greedy(),
+        LlamaSampler::penalties(PENALTY_LAST_N, 1.0, 0.0, SAMPLING_PRESENCE_PENALTY),
+        LlamaSampler::top_k(SAMPLING_TOP_K),
+        LlamaSampler::top_p(SAMPLING_TOP_P, 1),
+        LlamaSampler::min_p(SAMPLING_MIN_P, 1),
+        LlamaSampler::temp(SAMPLING_TEMP),
+        LlamaSampler::dist(SAMPLING_SEED),
     ]);
 
     let mut decoder = encoding_rs::UTF_8.new_decoder();
