@@ -14,36 +14,6 @@ smelt reads stdin, feeds it through a small local model (Qwen2.5 1.5B, Q4 quanti
 
 Inference runs on GPU via Vulkan, CUDA, or Metal. On CPU it works but is significantly slower.
 
-## Install
-
-```sh
-# Vulkan (Linux/Windows with NVIDIA, AMD, or Intel GPUs)
-cargo install --path . --features vulkan
-
-# CUDA (NVIDIA only)
-cargo install --path . --features cuda
-
-# Metal (macOS)
-cargo install --path . --features metal
-
-# CPU only (no GPU acceleration)
-cargo install --path .
-```
-
-### System dependencies
-
-**Arch Linux (Vulkan):**
-```sh
-sudo pacman -S vulkan-headers shaderc vulkan-icd-loader
-```
-
-**Ubuntu/Debian (Vulkan):**
-```sh
-sudo apt install libvulkan-dev glslang-tools
-```
-
-**CUDA:** Install the [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit).
-
 ## Usage
 
 Pipe any command through smelt:
@@ -112,6 +82,36 @@ Model load is ~0.8s (cached). Inference runs at ~50 tokens/s on GPU.
 ## Model
 
 Uses [Qwen2.5-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF) (Q4_K_M quantization, ~1.1GB). Downloaded automatically to `~/.local/share/smelt/models/` on first run.
+
+## Install
+
+```sh
+# Vulkan (Linux/Windows with NVIDIA, AMD, or Intel GPUs)
+cargo install --path . --features vulkan
+
+# CUDA (NVIDIA only)
+cargo install --path . --features cuda
+
+# Metal (macOS)
+cargo install --path . --features metal
+
+# CPU only (no GPU acceleration)
+cargo install --path .
+```
+
+### System dependencies
+
+**Arch Linux (Vulkan):**
+```sh
+sudo pacman -S vulkan-headers shaderc vulkan-icd-loader
+```
+
+**Ubuntu/Debian (Vulkan):**
+```sh
+sudo apt install libvulkan-dev glslang-tools
+```
+
+**CUDA:** Install the [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit).
 
 ## License
 
