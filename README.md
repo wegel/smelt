@@ -30,18 +30,18 @@ git log --oneline -50 | smelt
 
 When input exceeds the model's context window, smelt has two strategies for handling it:
 
-**`--last`** (default)
+**`--last`**
 Keeps the last N lines that fit in context, summarizes once. Fast. Best when the end of output has the verdict (build result, test pass/fail, error messages).
 
-**`--rolling`**
+**`--rolling`** (default)
 Processes the input in chunks sequentially, carrying a running summary forward into each next chunk. Slower (one inference per chunk) but captures information from the entire output. When stderr is attached to a terminal, smelt also streams each intermediate compaction there as it goes, without waiting for EOF.
 
 ```sh
+# Long test suite — want to know about all failures
+pytest -v 2>&1 | smelt
+
 # Long build log — just care about the result
 make 2>&1 | smelt --last
-
-# Long test suite — want to know about all failures
-pytest -v 2>&1 | smelt --rolling
 ```
 
 ### Raw Context
@@ -60,8 +60,8 @@ some-command 2>&1 | smelt --tail 10
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--last` | yes | Summarize only the tail of the input |
-| `--rolling` | | Rolling summary over the full input |
+| `--last` | | Summarize only the tail of the input |
+| `--rolling` | yes | Rolling summary over the full input |
 | `--head N` | | Include the first N raw lines before the summary |
 | `--tail N` | | Include the last N raw lines after the summary |
 | `--prompt TEXT` | "Summarize this command output:" | Custom instruction prompt |

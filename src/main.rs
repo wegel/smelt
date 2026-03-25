@@ -70,7 +70,7 @@ impl Strategy {
                 _ => {}
             }
         }
-        Strategy::Tail
+        Strategy::Rolling
     }
 }
 
@@ -699,8 +699,8 @@ USAGE:
     command | smelt [OPTIONS]
 
 OPTIONS:
-    --last            Summarize only the tail of the input (default)
-    --rolling         Summarize the full input in sequential chunks
+    --last            Summarize only the tail of the input
+    --rolling         Summarize the full input in sequential chunks (default)
     --head N          Include the first N raw lines before the summary
     --tail N          Include the last N raw lines after the summary
     --prompt TEXT     Set the instruction prompt (default: \"Summarize this command output:\")
@@ -711,8 +711,9 @@ OPTIONS:
 
 EXAMPLES:
     cargo build 2>&1 | smelt
-    npm test 2>&1 | smelt --rolling
+    npm test 2>&1 | smelt
     cargo build 2>&1 | smelt --head 5 --tail 3
+    cargo build 2>&1 | smelt --last
     kubectl get pods -A | smelt --ctx-size 16384"
     );
 }
